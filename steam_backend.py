@@ -20,7 +20,7 @@ COOLDOWN_SECONDS = {
 }
 
 def app_dir():
-    local_app_data = os.environ.get('LOCALAPPDATA', os.path.expanduser('~\\AppData\\Local'))
+    local_app_data = get_local_app_data()
     path = os.path.join(local_app_data, "LarpSenseNFA")
     os.makedirs(path, exist_ok=True)
     
@@ -35,6 +35,13 @@ def app_dir():
             pass
             
     return path
+
+def get_local_app_data():
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        return os.path.abspath(os.path.expandvars(local_app_data))
+    user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+    return os.path.abspath(os.path.join(user_profile, "AppData", "Local"))
 
 APP_DIR        = app_dir()
 ACCOUNTS_FILE  = os.path.join(APP_DIR, "accounts.json")
@@ -175,22 +182,55 @@ def check_token(token: str) -> dict:
 # ============================================================
 
 def find_steam():
-    for reg in [r"SOFTWARE\WOW6432Node\Valve\Steam", r"SOFTWARE\Valve\Steam"]:
+    registry_paths = [
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", ("InstallPath", "SteamPath")),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam", ("InstallPath", "SteamPath")),
+        (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Valve\Steam", ("SteamPath", "InstallPath")),
+    ]
+    for hive, key_path, value_names in registry_paths:
         try:
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, reg) as k:
-                p, _ = winreg.QueryValueEx(k, "InstallPath")
-                if os.path.exists(p): return p
-        except: pass
+            with winreg.OpenKey(hive, key_path) as key:
+                for value_name in value_names:
+                    try:
+                        path, _ = winreg.QueryValueEx(key, value_name)
+                        path = os.path.normpath(os.path.expandvars(path))
+                        if os.path.isdir(path): return path
+                    except OSError:
+                        pass
+        except OSError:
+            pass
     for p in [r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam", r"D:\Steam", r"E:\Steam"]:
-        if os.path.exists(p): return p
+        if os.path.isdir(p): return p
     return None
 
 def get_local_vdf():
-    return os.path.join(os.environ.get("LOCALAPPDATA",""), "Steam", "local.vdf")
+    return os.path.join(get_local_app_data(), "Steam", "local.vdf")
 
 def kill_steam():
+    taskkill_failed = False
     for proc in ["steam.exe", "steamwebhelper.exe"]:
-        subprocess.run(["taskkill","/f","/im",proc], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000)
+        try:
+            result = subprocess.run(
+                ["taskkill", "/f", "/im", proc],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=0x08000000,
+            )
+            taskkill_failed = taskkill_failed or result.returncode != 0
+        except OSError:
+            taskkill_failed = True
+    if taskkill_failed:
+        try:
+            import psutil
+            process_names = {"steam.exe", "steamwebhelper.exe"}
+            for process in psutil.process_iter(["name"]):
+                if (process.info["name"] or "").lower() in process_names:
+                    try:
+                        process.kill()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+        except ImportError:
+            pass
     time.sleep(2)
 
 def remove_readonly(path):
